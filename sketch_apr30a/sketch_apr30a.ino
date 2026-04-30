@@ -2,10 +2,16 @@
 #include <HTTPClient.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
-#include <ArduinoJson.h> // NEU: Bibliothek für Internet-Daten
+#include <ArduinoJson.h>
 
 // --- DEINE DATEN HIER EINTRAGEN ---
 
+
+
+// NEU: Liste von Standorten für das Wetter
+const int NUM_STAEDTE = 2;
+String staedte[NUM_STAEDTE] = {"Schlat,DE", "Faurndau,DE"};
+int aktuelleStadtIndex = 0; // Startet bei der ersten Stadt in der Liste
 // ----------------------------------
 
 TFT_eSPI tft = TFT_eSPI();
@@ -37,14 +43,14 @@ int pendingTaskIndex = -1;
 
 unsigned long lastTouchTime = 0;
 
-// NEU: Variablen zum Speichern der Wetterdaten
+// Variablen zum Speichern der Wetterdaten
 float w_temp = 0;
 float w_minTemp = 0;
 float w_maxTemp = 0;
 int w_humidity = 0;
 float w_wind = 0;
 String w_description = "";
-bool weatherNeedsUpdate = true; // Sagt dem Programm, wann neu geladen werden muss
+bool weatherNeedsUpdate = true; 
 
 // --- LAYOUT KOORDINATEN ---
 #define BTN_W 200
@@ -112,7 +118,7 @@ void loop() {
         }
         else if (isHit(x, y, BTN_X, BTN2_Y, BTN_W, BTN_H)) {
           currentState = STATE_WETTER;
-          weatherNeedsUpdate = true; // Daten beim Öffnen der App neu laden
+          weatherNeedsUpdate = true; 
           drawWetterScreen(); 
         }
       }
@@ -171,10 +177,22 @@ void loop() {
       // ZUSTAND 3: WETTER-APP
       // ==========================================
       else if (currentState == STATE_WETTER) {
-        // HOME Button gedrückt
+        // HOME Button gedrückt (Links)
         if (isHit(x, y, NAV_PREV_X, NAV_Y, NAV_W, NAV_H)) {
           currentState = STATE_HOME;
           drawHomeScreen();
+        }
+        // NEU: SWAP Button gedrückt (Rechts)
+        else if (isHit(x, y, NAV_NEXT_X, NAV_Y, NAV_W, NAV_H)) {
+          aktuelleStadtIndex++; // Zum nächsten Ort wechseln
+          
+          // Wenn wir am Ende der Liste sind, fangen wir wieder von vorne an
+          if (aktuelleStadtIndex >= NUM_STAEDTE) {
+            aktuelleStadtIndex = 0;
+          }
+          
+          weatherNeedsUpdate = true; // Daten für neuen Ort laden
+          drawWetterScreen(); // Direkt UI neu zeichnen ("Lade Daten..." anzeigen)
         }
       }
 
@@ -186,11 +204,10 @@ void loop() {
   }
 
   // --- WETTER LADEN LOGIK ---
-  // Wird außerhalb des Touch-Events ausgeführt, damit wir das UI zuerst zeichnen können
   if (currentState == STATE_WETTER && weatherNeedsUpdate) {
     fetchWeatherData();
     weatherNeedsUpdate = false;
-    drawWetterScreen(); // Screen mit neuen Daten neu zeichnen
+    drawWetterScreen(); 
   }
 }
 
@@ -284,33 +301,29 @@ void drawWetterScreen() {
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(2);
   tft.setCursor(20, 15);
-  String header = "Wetter: " + String(city);
-  header.replace(",DE", ""); // Macht die Anzeige etwas hübscher
+  // NEU: Holt den Namen der aktuellen Stadt aus der Liste
+  String header = "Wetter: " + staedte[aktuelleStadtIndex];
+  header.replace(",DE", ""); 
   tft.print(header);
   
   tft.drawLine(20, 35, 220, 35, TFT_DARKGREY);
 
   if (weatherNeedsUpdate) {
-    // Wird angezeigt, während die Daten aus dem Internet geladen werden
     tft.setTextColor(TFT_YELLOW);
     tft.setCursor(40, 100);
     tft.print("Lade Daten...");
   } else {
-    // Echte Daten anzeigen
-    // 1. Temperatur (Sehr groß)
     tft.setTextColor(TFT_ORANGE);
     tft.setTextSize(5);
     tft.setCursor(30, 50);
-    tft.print(w_temp, 1); // 1 Kommastelle
+    tft.print(w_temp, 1); 
     tft.print("C");
 
-    // 2. Beschreibung (z.B. "Bedeckt")
     tft.setTextColor(TFT_CYAN);
     tft.setTextSize(2);
     tft.setCursor(20, 100);
     tft.print(w_description);
 
-    // 3. Vorhersage & Details (Kleiner)
     tft.setTextColor(TFT_LIGHTGREY);
     tft.setTextSize(2);
     tft.setCursor(20, 140);
@@ -323,12 +336,19 @@ void drawWetterScreen() {
     tft.print("Wind: " + String(w_wind, 1) + " m/s");
   }
 
-  // HOME Button
+  // HOME Button (Links)
   tft.fillRoundRect(NAV_PREV_X, NAV_Y, NAV_W, NAV_H, 5, TFT_BLUE);
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(2);
   tft.setCursor(NAV_PREV_X + 15, NAV_Y + 15);
   tft.print("HOME");
+
+  // NEU: SWAP Button (Rechts)
+  tft.fillRoundRect(NAV_NEXT_X, NAV_Y, NAV_W, NAV_H, 5, TFT_PURPLE);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(NAV_NEXT_X + 15, NAV_Y + 15);
+  tft.print("SWAP");
 }
 
 void drawStatus(String text) {
@@ -358,12 +378,11 @@ void sendPushoverMessage(String message) {
   }
 }
 
-// NEU: Wetterdaten abrufen
 void fetchWeatherData() {
   if (WiFi.status() == WL_CONNECTED) {
     HTTPClient http;
-    // URL für die OpenWeatherMap API (metric = Celsius, lang=de = Deutsch)
-    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + String(city) + "&appid=" + String(owmApiKey) + "&units=metric&lang=de";
+    // NEU: Die URL nutzt jetzt dynamisch den Ort aus unserer Liste
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + staedte[aktuelleStadtIndex] + "&appid=" + String(owmApiKey) + "&units=metric&lang=de";
     
     http.begin(url);
     int httpCode = http.GET();
@@ -371,23 +390,19 @@ void fetchWeatherData() {
     if (httpCode > 0) {
       String payload = http.getString();
       
-      // JSON entschlüsseln
       JsonDocument doc;
       DeserializationError error = deserializeJson(doc, payload);
 
       if (!error) {
-        // Daten aus dem JSON-Paket auslesen und in unseren Variablen speichern
         w_temp = doc["main"]["temp"];
         w_minTemp = doc["main"]["temp_min"];
         w_maxTemp = doc["main"]["temp_max"];
         w_humidity = doc["main"]["humidity"];
         w_wind = doc["wind"]["speed"];
         
-        // Die Beschreibung herausfiltern (z.B. "klarer Himmel")
         const char* desc = doc["weather"][0]["description"];
         w_description = String(desc);
         
-        // Den ersten Buchstaben groß machen, sieht besser aus
         if(w_description.length() > 0) {
            w_description[0] = toupper(w_description[0]);
         }
