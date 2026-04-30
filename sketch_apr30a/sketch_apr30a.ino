@@ -2,6 +2,7 @@
 #include <HTTPClient.h>
 #include <SPI.h>
 #include <TFT_eSPI.h>
+#include <ArduinoJson.h> // NEU: Bibliothek für Internet-Daten
 
 // --- DEINE DATEN HIER EINTRAGEN ---
 
@@ -16,10 +17,8 @@ struct Task {
   uint16_t color;
 };
 
-// Wie viele Aufgaben gibt es insgesamt?
 const int NUM_TASKS = 4; 
 
-// Unsere Aufgaben-Liste
 Task tasks[NUM_TASKS] = {
   {"Kochen", "Wer macht heute das vegane Abendessen? 🥦", TFT_DARKGREEN},
   {"Muell", "Bitte den Müll rausbringen! 🗑️", TFT_MAROON},
@@ -28,8 +27,8 @@ Task tasks[NUM_TASKS] = {
 };
 
 // --- VARIABLEN FÜR DIE LOGIK ---
-enum AppState { STATE_MENU, STATE_CONFIRM };
-AppState currentState = STATE_MENU;
+enum AppState { STATE_HOME, STATE_HAUSHALT_MENU, STATE_HAUSHALT_CONFIRM, STATE_WETTER };
+AppState currentState = STATE_HOME;
 
 int currentPage = 0;
 const int TASKS_PER_PAGE = 2;
@@ -37,6 +36,15 @@ int totalPages = (NUM_TASKS + TASKS_PER_PAGE - 1) / TASKS_PER_PAGE;
 int pendingTaskIndex = -1;
 
 unsigned long lastTouchTime = 0;
+
+// NEU: Variablen zum Speichern der Wetterdaten
+float w_temp = 0;
+float w_minTemp = 0;
+float w_maxTemp = 0;
+int w_humidity = 0;
+float w_wind = 0;
+String w_description = "";
+bool weatherNeedsUpdate = true; // Sagt dem Programm, wann neu geladen werden muss
 
 // --- LAYOUT KOORDINATEN ---
 #define BTN_W 200
@@ -62,7 +70,7 @@ void setup() {
   Serial.begin(115200);
 
   tft.init();
-  tft.setRotation(0); // Hochformat
+  tft.setRotation(0); 
   tft.fillScreen(TFT_BLACK);
 
   uint16_t calData[5] = { 275, 3620, 264, 3532, 1 };
@@ -82,79 +90,107 @@ void setup() {
     Serial.print(".");
   }
 
-  drawMenu();
+  drawHomeScreen();
 }
 
 void loop() {
   uint16_t x, y;
 
   if (tft.getTouch(&x, &y)) {
-    
-    // --- BUGFIX 1: X-Achse spiegeln ---
-    // Korrigiert das Problem, dass Rechts und Links vertauscht waren
     x = 240 - x; 
     
     if (millis() - lastTouchTime > 100) {
 
       // ==========================================
-      // ZUSTAND 1: HAUPTMENÜ
+      // ZUSTAND 0: HOME SCREEN
       // ==========================================
-      if (currentState == STATE_MENU) {
-        
+      if (currentState == STATE_HOME) {
+        if (isHit(x, y, BTN_X, BTN1_Y, BTN_W, BTN_H)) {
+          currentState = STATE_HAUSHALT_MENU;
+          currentPage = 0;
+          drawHaushaltMenu();
+        }
+        else if (isHit(x, y, BTN_X, BTN2_Y, BTN_W, BTN_H)) {
+          currentState = STATE_WETTER;
+          weatherNeedsUpdate = true; // Daten beim Öffnen der App neu laden
+          drawWetterScreen(); 
+        }
+      }
+
+      // ==========================================
+      // ZUSTAND 1: HAUSHALTS-APP
+      // ==========================================
+      else if (currentState == STATE_HAUSHALT_MENU) {
         int task1Index = currentPage * TASKS_PER_PAGE;
         int task2Index = task1Index + 1;
 
         if (task1Index < NUM_TASKS && isHit(x, y, BTN_X, BTN1_Y, BTN_W, BTN_H)) {
           pendingTaskIndex = task1Index;
-          currentState = STATE_CONFIRM;
+          currentState = STATE_HAUSHALT_CONFIRM;
           drawConfirm();
         }
-        
         else if (task2Index < NUM_TASKS && isHit(x, y, BTN_X, BTN2_Y, BTN_W, BTN_H)) {
           pendingTaskIndex = task2Index;
-          currentState = STATE_CONFIRM;
+          currentState = STATE_HAUSHALT_CONFIRM;
           drawConfirm();
         }
-
-        else if (currentPage > 0 && isHit(x, y, NAV_PREV_X, NAV_Y, NAV_W, NAV_H)) {
-          currentPage--;
-          drawMenu();
+        else if (isHit(x, y, NAV_PREV_X, NAV_Y, NAV_W, NAV_H)) {
+          if (currentPage == 0) {
+            currentState = STATE_HOME;
+            drawHomeScreen();
+          } else {
+            currentPage--;
+            drawHaushaltMenu();
+          }
         }
-
         else if (currentPage < totalPages - 1 && isHit(x, y, NAV_NEXT_X, NAV_Y, NAV_W, NAV_H)) {
           currentPage++;
-          drawMenu();
+          drawHaushaltMenu();
         }
       }
       
       // ==========================================
-      // ZUSTAND 2: BESTÄTIGUNG
+      // ZUSTAND 2: HAUSHALTS-APP BESTÄTIGUNG
       // ==========================================
-      else if (currentState == STATE_CONFIRM) {
-        
+      else if (currentState == STATE_HAUSHALT_CONFIRM) {
         if (isHit(x, y, CONFIRM_YES_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H)) {
           drawStatus("Sende...");
           sendPushoverMessage(tasks[pendingTaskIndex].message);
           drawStatus("Gesendet!");
           delay(1500); 
-          currentState = STATE_MENU;
-          drawMenu();
+          currentState = STATE_HAUSHALT_MENU;
+          drawHaushaltMenu();
         }
-
         else if (isHit(x, y, CONFIRM_NO_X, CONFIRM_Y, CONFIRM_W, CONFIRM_H)) {
-          currentState = STATE_MENU;
-          drawMenu();
+          currentState = STATE_HAUSHALT_MENU;
+          drawHaushaltMenu();
         }
       }
 
-      // --- BUGFIX 2: Warten auf Loslassen ---
-      // Verhindert versehentliche Doppelklicks und Durchrutschen durch Menüs
+      // ==========================================
+      // ZUSTAND 3: WETTER-APP
+      // ==========================================
+      else if (currentState == STATE_WETTER) {
+        // HOME Button gedrückt
+        if (isHit(x, y, NAV_PREV_X, NAV_Y, NAV_W, NAV_H)) {
+          currentState = STATE_HOME;
+          drawHomeScreen();
+        }
+      }
+
       while(tft.getTouch(&x, &y)) { 
         delay(20); 
       }
-      
       lastTouchTime = millis();
     }
+  }
+
+  // --- WETTER LADEN LOGIK ---
+  // Wird außerhalb des Touch-Events ausgeführt, damit wir das UI zuerst zeichnen können
+  if (currentState == STATE_WETTER && weatherNeedsUpdate) {
+    fetchWeatherData();
+    weatherNeedsUpdate = false;
+    drawWetterScreen(); // Screen mit neuen Daten neu zeichnen
   }
 }
 
@@ -162,9 +198,28 @@ bool isHit(uint16_t tx, uint16_t ty, uint16_t bx, uint16_t by, uint16_t bw, uint
   return (tx > bx && tx < (bx + bw) && ty > by && ty < (by + bh));
 }
 
-void drawMenu() {
-  tft.fillScreen(TFT_BLACK);
+// ==========================================
+// GRAFIK-FUNKTIONEN
+// ==========================================
 
+void drawHomeScreen() {
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(50, 15);
+  tft.print("MAIN MENU");
+
+  tft.fillRoundRect(BTN_X, BTN1_Y, BTN_W, BTN_H, 8, TFT_BLUE);
+  tft.setCursor(BTN_X + 45, BTN1_Y + 25);
+  tft.print("Haushalt");
+
+  tft.fillRoundRect(BTN_X, BTN2_Y, BTN_W, BTN_H, 8, TFT_ORANGE);
+  tft.setCursor(BTN_X + 55, BTN2_Y + 25);
+  tft.print("Wetter");
+}
+
+void drawHaushaltMenu() {
+  tft.fillScreen(TFT_BLACK);
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(2);
   tft.setCursor(20, 15);
@@ -178,14 +233,17 @@ void drawMenu() {
     tft.setCursor(BTN_X + 20, BTN1_Y + 25);
     tft.print(tasks[task1Index].title);
   }
-
   if (task2Index < NUM_TASKS) {
     tft.fillRoundRect(BTN_X, BTN2_Y, BTN_W, BTN_H, 8, tasks[task2Index].color);
     tft.setCursor(BTN_X + 20, BTN2_Y + 25);
     tft.print(tasks[task2Index].title);
   }
 
-  if (currentPage > 0) {
+  if (currentPage == 0) {
+    tft.fillRoundRect(NAV_PREV_X, NAV_Y, NAV_W, NAV_H, 5, TFT_BLUE);
+    tft.setCursor(NAV_PREV_X + 15, NAV_Y + 15);
+    tft.print("HOME");
+  } else {
     tft.fillRoundRect(NAV_PREV_X, NAV_Y, NAV_W, NAV_H, 5, TFT_DARKGREY);
     tft.setCursor(NAV_PREV_X + 25, NAV_Y + 15);
     tft.print("<-");
@@ -200,7 +258,6 @@ void drawMenu() {
 
 void drawConfirm() {
   tft.fillScreen(TFT_BLACK);
-
   tft.setTextColor(TFT_WHITE);
   tft.setTextSize(2);
   tft.setCursor(20, 30);
@@ -220,6 +277,60 @@ void drawConfirm() {
   tft.print("NEIN");
 }
 
+void drawWetterScreen() {
+  tft.fillScreen(TFT_BLACK);
+
+  // Kopfzeile
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(20, 15);
+  String header = "Wetter: " + String(city);
+  header.replace(",DE", ""); // Macht die Anzeige etwas hübscher
+  tft.print(header);
+  
+  tft.drawLine(20, 35, 220, 35, TFT_DARKGREY);
+
+  if (weatherNeedsUpdate) {
+    // Wird angezeigt, während die Daten aus dem Internet geladen werden
+    tft.setTextColor(TFT_YELLOW);
+    tft.setCursor(40, 100);
+    tft.print("Lade Daten...");
+  } else {
+    // Echte Daten anzeigen
+    // 1. Temperatur (Sehr groß)
+    tft.setTextColor(TFT_ORANGE);
+    tft.setTextSize(5);
+    tft.setCursor(30, 50);
+    tft.print(w_temp, 1); // 1 Kommastelle
+    tft.print("C");
+
+    // 2. Beschreibung (z.B. "Bedeckt")
+    tft.setTextColor(TFT_CYAN);
+    tft.setTextSize(2);
+    tft.setCursor(20, 100);
+    tft.print(w_description);
+
+    // 3. Vorhersage & Details (Kleiner)
+    tft.setTextColor(TFT_LIGHTGREY);
+    tft.setTextSize(2);
+    tft.setCursor(20, 140);
+    tft.print("Tag: " + String(w_minTemp, 0) + "C bis " + String(w_maxTemp, 0) + "C");
+
+    tft.setCursor(20, 170);
+    tft.print("Feuchte: " + String(w_humidity) + "%");
+
+    tft.setCursor(20, 200);
+    tft.print("Wind: " + String(w_wind, 1) + " m/s");
+  }
+
+  // HOME Button
+  tft.fillRoundRect(NAV_PREV_X, NAV_Y, NAV_W, NAV_H, 5, TFT_BLUE);
+  tft.setTextColor(TFT_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(NAV_PREV_X + 15, NAV_Y + 15);
+  tft.print("HOME");
+}
+
 void drawStatus(String text) {
   tft.fillRect(0, 260, 240, 60, TFT_BLACK); 
   tft.setTextColor(TFT_CYAN);
@@ -227,6 +338,10 @@ void drawStatus(String text) {
   tft.setCursor(60, 280);
   tft.print(text);
 }
+
+// ==========================================
+// NETZWERK-FUNKTIONEN
+// ==========================================
 
 void sendPushoverMessage(String message) {
   if (WiFi.status() == WL_CONNECTED) {
@@ -236,16 +351,53 @@ void sendPushoverMessage(String message) {
 
     String postData = "token=" + String(pushoverApiToken) + 
                       "&user=" + String(pushoverUserKey) + 
-                      "&message=" + message; h
+                      "&message=" + message;
 
     int httpResponseCode = http.POST(postData);
+    http.end();
+  }
+}
 
-    if (httpResponseCode > 0) {
-      Serial.print("Pushover gesendet! Code: ");
-      Serial.println(httpResponseCode);
+// NEU: Wetterdaten abrufen
+void fetchWeatherData() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    // URL für die OpenWeatherMap API (metric = Celsius, lang=de = Deutsch)
+    String url = "http://api.openweathermap.org/data/2.5/weather?q=" + String(city) + "&appid=" + String(owmApiKey) + "&units=metric&lang=de";
+    
+    http.begin(url);
+    int httpCode = http.GET();
+    
+    if (httpCode > 0) {
+      String payload = http.getString();
+      
+      // JSON entschlüsseln
+      JsonDocument doc;
+      DeserializationError error = deserializeJson(doc, payload);
+
+      if (!error) {
+        // Daten aus dem JSON-Paket auslesen und in unseren Variablen speichern
+        w_temp = doc["main"]["temp"];
+        w_minTemp = doc["main"]["temp_min"];
+        w_maxTemp = doc["main"]["temp_max"];
+        w_humidity = doc["main"]["humidity"];
+        w_wind = doc["wind"]["speed"];
+        
+        // Die Beschreibung herausfiltern (z.B. "klarer Himmel")
+        const char* desc = doc["weather"][0]["description"];
+        w_description = String(desc);
+        
+        // Den ersten Buchstaben groß machen, sieht besser aus
+        if(w_description.length() > 0) {
+           w_description[0] = toupper(w_description[0]);
+        }
+      } else {
+        Serial.print("JSON Fehler: ");
+        Serial.println(error.c_str());
+        w_description = "Fehler beim Laden";
+      }
     } else {
-      Serial.print("Fehler beim Senden: ");
-      Serial.println(httpResponseCode);
+      w_description = "Kein Internet";
     }
     http.end();
   }
